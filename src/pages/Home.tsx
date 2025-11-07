@@ -2,6 +2,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useNavigate } from "react-router-dom";
 import { useEffect, useRef } from "react";
+import HeroAnimation from "@/components/HeroAnimation";
+import GradientWave from "@/components/GradientWave";
 
 const heroImages = [
   "/placeholder.svg",
@@ -44,13 +46,16 @@ const Home = () => {
   return (
     <div className="min-h-screen">
       {/* Hero Section */}
-      <section className="relative h-[500px] md:h-[600px] flex items-center justify-center bg-black">
+      <section className="relative h-[500px] md:h-[600px] flex items-center justify-center bg-black overflow-hidden">
         <img 
           src={heroImages[1]} 
           alt="Madona Heights Hero" 
           className="absolute inset-0 w-full h-full object-cover object-center opacity-75" 
         />
         <div className="absolute inset-0 bg-black/50"></div>
+        {/* Animated Background Elements */}
+        <GradientWave />
+        <HeroAnimation />
         <div className="relative z-10 text-center text-white px-4">
           <h1 className="text-5xl md:text-6xl font-bold mb-6 drop-shadow">Discover Madona Heights</h1>
           <p className="text-xl md:text-2xl mb-8 max-w-2xl mx-auto drop-shadow">

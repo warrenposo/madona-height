@@ -171,7 +171,6 @@ const Login = () => {
           </form>
           <div className="mt-4 text-center text-sm text-muted-foreground">
             <p><Link to="/signup" className="text-primary hover:underline">Don't have an account? Sign Up</Link></p>
-            <p>Only <span className="font-semibold">warrenokumu98@gmail.com</span> is Admin.</p>
           </div>
         </CardContent>
       </Card>
