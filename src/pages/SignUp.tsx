@@ -17,21 +17,59 @@ const SignUp = () => {
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    setLoading(false);
-    if (error) {
+    
+    try {
+      // Sign up with email confirmation enabled
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/verify-email`,
+          data: {
+            email: email,
+          }
+        }
+      });
+      
+      if (error) {
+        setLoading(false);
+        toast({
+          title: "Sign Up Failed",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Profile will be created automatically by database trigger
+      // No need to manually create it here - the trigger handles it
+
+      setLoading(false);
+      
+      if (data.user && !data.session) {
+        // Email confirmation required
+        toast({
+          title: "Sign Up Successful!",
+          description: "Please check your email to verify your account. Click the link in the email to complete registration.",
+          duration: 10000,
+        });
+      } else {
+        // User is already confirmed (if email confirmation is disabled)
+        toast({
+          title: "Sign Up Successful",
+          description: "Welcome! You can now log in.",
+        });
+      }
+      
+      navigate("/login");
+    } catch (err: any) {
+      setLoading(false);
       toast({
         title: "Sign Up Failed",
-        description: error.message,
+        description: err.message || "An unexpected error occurred",
         variant: "destructive",
       });
-      return;
     }
-    toast({
-      title: "Sign Up Successful",
-      description: "Welcome! Please check your email for verification instructions.",
-    });
-    navigate("/login");
   };
 
   return (

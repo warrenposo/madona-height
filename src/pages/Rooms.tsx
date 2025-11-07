@@ -10,9 +10,14 @@ interface Room {
   id: number;
   type: string;
   price: number;
-  description: string;
+  description?: string;
   features: string[];
-  image_url?: string;
+  images?: string[];
+  status?: string;
+  room_number?: string;
+  floor_number?: number;
+  square_feet?: number;
+  max_occupancy?: number;
 }
 
 const Rooms = () => {
@@ -37,7 +42,8 @@ const Rooms = () => {
         (data || []).map((room: any) => ({
           ...room,
           features: room.features || [],
-          image_url: room.image_url || undefined,
+          images: room.images || [],
+          description: room.description || '',
         }))
       );
       setLoading(false);
@@ -102,22 +108,30 @@ const Rooms = () => {
           <div className="text-center text-muted-foreground">No rooms available.</div>
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-2 gap-8">
-            {rooms.map((room) => (
+            {rooms.filter(room => !room.status || room.status === 'Available').map((room) => (
               <Card key={room.id} className="overflow-hidden hover:shadow-xl transition-shadow">
-                <div className="aspect-video bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center">
-                  {room.image_url ? (
+                <div className="aspect-video bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center relative">
+                  {room.images && room.images.length > 0 ? (
                     <img
-                      src={room.image_url}
+                      src={room.images[0]}
                       alt={`${room.type} Room`}
                       className="w-full h-full object-cover object-center"
                     />
                   ) : (
                     <span className="text-muted-foreground">No Image</span>
                   )}
+                  {room.status && (
+                    <Badge className="absolute top-2 right-2" variant={room.status === 'Available' ? 'default' : 'secondary'}>
+                      {room.status}
+                    </Badge>
+                  )}
                 </div>
                 <CardHeader>
-                  <CardTitle className="text-2xl">{room.type}</CardTitle>
-                  <CardDescription>{room.description}</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {room.type}
+                    {room.room_number && <span className="text-lg text-muted-foreground ml-2">({room.room_number})</span>}
+                  </CardTitle>
+                  <CardDescription>{room.description || 'Comfortable and well-maintained room'}</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <div className="mb-4">
@@ -126,6 +140,13 @@ const Rooms = () => {
                     </span>
                     <span className="text-muted-foreground"> /month</span>
                   </div>
+                  {(room.floor_number || room.square_feet || room.max_occupancy) && (
+                    <div className="flex gap-4 text-sm text-muted-foreground mb-3">
+                      {room.floor_number && <span>Floor {room.floor_number}</span>}
+                      {room.square_feet && <span>{room.square_feet} sq ft</span>}
+                      {room.max_occupancy && <span>Max {room.max_occupancy} person{room.max_occupancy > 1 ? 's' : ''}</span>}
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-2">
                     {(room.features || []).map((feature, index) => (
                       <Badge key={index} variant="secondary">{feature}</Badge>

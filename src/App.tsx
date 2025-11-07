@@ -14,6 +14,7 @@ import NotFound from "./pages/NotFound";
 import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
 import SignUp from "./pages/SignUp";
+import VerifyEmail from "./pages/VerifyEmail";
 import SupportChatWidget from "./components/SupportChatWidget";
 
 const queryClient = new QueryClient();
@@ -39,6 +40,7 @@ const App = () => (
           <Route path="/testimonials" element={<Layout><Testimonials /></Layout>} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<SignUp />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
           <Route path="/dashboard" element={<Layout><UserDashboard /></Layout>} />
           <Route path="/admin" element={<Layout><AdminDashboard /></Layout>} />
           <Route path="*" element={<NotFound />} />

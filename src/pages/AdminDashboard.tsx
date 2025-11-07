@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Users, Home, DollarSign, MessageSquare, Edit, Trash2, Plus } from "lucide-react";
 import { supabase } from "@/lib/supabaseClient";
 import { useToast } from "@/hooks/use-toast";
@@ -18,6 +19,10 @@ interface Room {
   features: string[];
   images?: string[];
   status: string;
+  room_number?: string;
+  floor_number?: number;
+  square_feet?: number;
+  max_occupancy?: number;
 }
 
 interface BookingWithRoomUser {
@@ -28,9 +33,13 @@ interface BookingWithRoomUser {
   full_name?: string;
   price: number;
   status: string;
+  start_date?: string;
+  end_date?: string;
+  notes?: string;
+  created_at?: string;
 }
 
-const ADMIN_EMAIL = "warrenokumu98@gmail.com";
+// Admin is determined by role in profiles table, not by email constant
 
 const AdminDashboard = () => {
   const { toast } = useToast();
@@ -39,8 +48,19 @@ const AdminDashboard = () => {
   const [showRoomDialog, setShowRoomDialog] = useState(false);
   const [editingRoom, setEditingRoom] = useState<Room | null>(null);
   // Fix the type for roomForm state
-  type RoomForm = Omit<Room, 'id'|'image_url'> & { status?: string; images?: string[] };
-  const [roomForm, setRoomForm] = useState<RoomForm>({ type: '', price: 0, description: '', features: [], images: [], status: 'Available' });
+  type RoomForm = Omit<Room, 'id'> & { status?: string; images?: string[] };
+  const [roomForm, setRoomForm] = useState<RoomForm>({ 
+    type: '', 
+    price: 0, 
+    description: '', 
+    features: [], 
+    images: [], 
+    status: 'Available',
+    room_number: '',
+    floor_number: undefined,
+    square_feet: undefined,
+    max_occupancy: 1
+  });
   const [saving, setSaving] = useState(false);
   const [deletingRoomId, setDeletingRoomId] = useState<number | null>(null);
 
@@ -73,14 +93,45 @@ const AdminDashboard = () => {
   const fetchBookings = async () => {
     setLoadingBookings(true);
     // Join bookings, rooms, and profiles
-    const { data, error } = await supabase.rpc('admin_bookings_view');
-    // See below: should define this rpc or do client-side join if not available
+    const { data, error } = await supabase
+      .from('bookings')
+      .select(`
+        id,
+        room_id,
+        user_id,
+        price,
+        status,
+        start_date,
+        end_date,
+        notes,
+        created_at,
+        rooms:room_id(type, room_number),
+        profiles:user_id(full_name, email, phone)
+      `)
+      .order('created_at', { ascending: false });
+    
     if (error) {
       toast({ title: "Error fetching bookings", description: error.message, variant: "destructive" });
       setLoadingBookings(false);
       return;
     }
-    setBookings(data || []);
+    
+    // Map the data to match the BookingWithRoomUser interface
+    const mappedBookings = (data || []).map((booking: any) => ({
+      id: booking.id,
+      room_id: booking.room_id,
+      user_id: booking.user_id,
+      room_type: `${booking.rooms?.type || 'Unknown'}${booking.rooms?.room_number ? ` (${booking.rooms.room_number})` : ''}`,
+      full_name: booking.profiles?.full_name || booking.profiles?.email || booking.user_id,
+      price: booking.price,
+      status: booking.status,
+      start_date: booking.start_date,
+      end_date: booking.end_date,
+      notes: booking.notes,
+      created_at: booking.created_at,
+    }));
+    
+    setBookings(mappedBookings);
     setLoadingBookings(false);
   };
 
@@ -115,7 +166,15 @@ const AdminDashboard = () => {
       .select()
       .or(`and(sender_id.eq.${userId},receiver_id.eq.${admin.id}),and(sender_id.eq.${admin.id},receiver_id.eq.${userId})`)
       .order('created_at');
-    if (!error) setMessages(data || []);
+    if (!error) {
+      setMessages(data || []);
+      // Mark messages as read when admin views them
+      const unreadMessages = (data || []).filter((msg: any) => msg.receiver_id === admin.id && !msg.is_read);
+      if (unreadMessages.length > 0) {
+        const messageIds = unreadMessages.map((msg: any) => msg.id);
+        await supabase.from('messages').update({ is_read: true }).in('id', messageIds);
+      }
+    }
   };
   useEffect(() => { if (selectedUser?.id && admin?.id) fetchMessages(selectedUser.id); }, [selectedUser, admin]);
   // Subscribe for live updates
@@ -136,9 +195,45 @@ const AdminDashboard = () => {
   const handleSend = async (e: any) => {
     e.preventDefault();
     if (!newMessage.trim() || !selectedUser?.id || !admin?.id) return;
-    const { error } = await supabase.from('messages').insert({ sender_id: admin.id, receiver_id: selectedUser.id, content: newMessage });
-    if (error) toast({ title: 'Send failed', description: error.message, variant: 'destructive' });
-    setNewMessage("");
+    
+    const messageContent = newMessage.trim();
+    setNewMessage(""); // Clear input immediately
+    
+    // Optimistically add message to UI
+    const tempMessage = {
+      id: `temp-${Date.now()}`,
+      sender_id: admin.id,
+      receiver_id: selectedUser.id,
+      content: messageContent,
+      created_at: new Date().toISOString(),
+      is_read: false
+    };
+    setMessages(prev => [...prev, tempMessage]);
+    
+    // Send message to database
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({ sender_id: admin.id, receiver_id: selectedUser.id, content: messageContent })
+      .select()
+      .single();
+    
+    if (error) {
+      toast({ title: 'Send failed', description: error.message, variant: 'destructive' });
+      // Remove temp message on error
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      setNewMessage(messageContent); // Restore message
+      return;
+    }
+    
+    // Replace temp message with real one
+    if (data) {
+      setMessages(prev => {
+        const filtered = prev.filter(m => m.id !== tempMessage.id);
+        return [...filtered, data];
+      });
+      // Refetch to ensure sync
+      setTimeout(() => fetchMessages(selectedUser.id), 500);
+    }
   };
 
   useEffect(() => { fetchRooms(); }, []);
@@ -147,7 +242,18 @@ const AdminDashboard = () => {
   // Handle Add/Edit
   const openAddRoom = () => {
     setEditingRoom(null);
-    setRoomForm({ type: '', price: 0, description: '', features: [], images: [], status: 'Available' });
+    setRoomForm({ 
+      type: '', 
+      price: 0, 
+      description: '', 
+      features: [], 
+      images: [], 
+      status: 'Available',
+      room_number: '',
+      floor_number: undefined,
+      square_feet: undefined,
+      max_occupancy: 1
+    });
     setShowRoomDialog(true);
   };
   const openEditRoom = (room: Room) => {
@@ -214,11 +320,11 @@ const AdminDashboard = () => {
 
   // Update booking status
   const handleUpdateBookingStatus = async (id: number, status: string) => {
-    const { error } = await supabase.from('bookings').update({ status }).eq('id', id);
+    const { error } = await supabase.from('bookings').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
     if (error) {
       toast({ title: 'Update failed', description: error.message, variant: 'destructive' });
     } else {
-      toast({ title: 'Booking updated' });
+      toast({ title: 'Booking updated', description: `Status changed to ${status}` });
       fetchBookings();
     }
   };
@@ -320,8 +426,33 @@ const AdminDashboard = () => {
                     {uploadingImages && <div className="text-xs mt-1">Uploading images...</div>}
                   </div>
                   <div>
+                    <Label>Room Number</Label>
+                    <Input value={roomForm.room_number || ''} onChange={e => handleRoomFormChange('room_number', e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Floor Number</Label>
+                    <Input type="number" value={roomForm.floor_number || ''} onChange={e => handleRoomFormChange('floor_number', parseInt(e.target.value) || undefined)} />
+                  </div>
+                  <div>
+                    <Label>Square Feet</Label>
+                    <Input type="number" value={roomForm.square_feet || ''} onChange={e => handleRoomFormChange('square_feet', parseInt(e.target.value) || undefined)} />
+                  </div>
+                  <div>
+                    <Label>Max Occupancy</Label>
+                    <Input type="number" min="1" value={roomForm.max_occupancy || 1} onChange={e => handleRoomFormChange('max_occupancy', parseInt(e.target.value) || 1)} />
+                  </div>
+                  <div>
                     <Label>Status</Label>
-                    <Input value={roomForm.status} onChange={e => handleRoomFormChange('status', e.target.value)} />
+                    <select 
+                      value={roomForm.status} 
+                      onChange={e => handleRoomFormChange('status', e.target.value)}
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="Available">Available</option>
+                      <option value="Occupied">Occupied</option>
+                      <option value="Maintenance">Maintenance</option>
+                      <option value="Reserved">Reserved</option>
+                    </select>
                   </div>
                   <DialogFooter>
                     <Button type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save'}</Button>
@@ -342,22 +473,44 @@ const AdminDashboard = () => {
                 {loadingBookings ? (<div>Loading bookings...</div>) : bookings.length === 0 ? (<div>No bookings found.</div>) : (
                 <div className="space-y-4">
                     {bookings.map(booking => (
-                      <div key={booking.id} className="flex items-center justify-between p-4 border rounded-lg">
-                      <div>
-                          <div className="font-semibold">{booking.full_name || booking.user_id}</div>
-                          <div className="text-sm text-muted-foreground">Room: {booking.room_type}</div>
-                      </div>
-                      <div className="text-right">
-                          <div>KSh {booking.price?.toLocaleString()}</div>
-                          <Badge variant={booking.status === 'paid' ? 'secondary' : 'default'}>{booking.status}</Badge>
+                      <div key={booking.id} className="p-4 border rounded-lg space-y-2">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="font-semibold">{booking.full_name || booking.user_id}</div>
+                            <div className="text-sm text-muted-foreground">Room: {booking.room_type}</div>
+                            {(booking.start_date || booking.end_date) && (
+                              <div className="text-xs text-muted-foreground mt-1">
+                                {booking.start_date && `From: ${new Date(booking.start_date).toLocaleDateString()}`}
+                                {booking.start_date && booking.end_date && ' • '}
+                                {booking.end_date && `To: ${new Date(booking.end_date).toLocaleDateString()}`}
+                              </div>
+                            )}
+                            {booking.notes && (
+                              <div className="text-xs text-muted-foreground mt-1 italic">Note: {booking.notes}</div>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <div className="font-semibold">KSh {booking.price?.toLocaleString()}</div>
+                            <Badge variant={booking.status === 'paid' ? 'secondary' : booking.status === 'approved' ? 'default' : 'outline'}>{booking.status}</Badge>
+                          </div>
                         </div>
-                        <div className="flex gap-1">
-                          {booking.status !== 'paid' && (
-                            <Button size="sm" onClick={() => handleUpdateBookingStatus(booking.id, 'paid')}>Mark as Paid</Button>
-                          )}
+                        <div className="flex gap-2 justify-end">
+                          <Select value={booking.status} onValueChange={(value) => handleUpdateBookingStatus(booking.id, value)}>
+                            <SelectTrigger className="w-40">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="pending">Pending</SelectItem>
+                              <SelectItem value="approved">Approved</SelectItem>
+                              <SelectItem value="rejected">Rejected</SelectItem>
+                              <SelectItem value="paid">Paid</SelectItem>
+                              <SelectItem value="cancelled">Cancelled</SelectItem>
+                              <SelectItem value="completed">Completed</SelectItem>
+                            </SelectContent>
+                          </Select>
                           <Button size="icon" variant="ghost" onClick={() => handleDeleteBooking(booking.id)}><Trash2 className="h-4 w-4" /></Button>
+                        </div>
                       </div>
-                    </div>
                   ))}
                 </div>
                 )}

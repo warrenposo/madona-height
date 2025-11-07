@@ -9,24 +9,139 @@ import { useToast } from "@/hooks/use-toast";
 
 const ADMIN_EMAIL = "warrenokumu98@gmail.com";
 
+interface UserProfile {
+  id: string;
+  full_name?: string;
+  email?: string;
+  phone?: string;
+}
+
+interface UserBooking {
+  id: number;
+  room_id: number;
+  room_type: string;
+  price: number;
+  status: string;
+  start_date?: string;
+  end_date?: string;
+  created_at: string;
+}
+
+interface Payment {
+  id: number;
+  booking_id: number;
+  amount: number;
+  status: string;
+  payment_date: string;
+  payment_method?: string;
+  transaction_id?: string;
+  created_at: string;
+}
+
 const UserDashboard = () => {
   const [messages, setMessages] = useState<any[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const [user, setUser] = useState<any>(null);
   const [adminId, setAdminId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [currentBooking, setCurrentBooking] = useState<UserBooking | null>(null);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [loadingData, setLoadingData] = useState(true);
   const { toast } = useToast();
   const chatRef = useRef<HTMLDivElement>(null);
 
-  // Fetch user and admin id
+  // Fetch user, profile, booking, and payments
   useEffect(() => {
-    const getUserAndAdmin = async () => {
+    const fetchUserData = async () => {
+      setLoadingData(true);
       const { data: { user } } = await supabase.auth.getUser();
       setUser(user);
-      // Fetch admin id
-      const { data, error } = await supabase.from('profiles').select('id').eq('email', ADMIN_EMAIL).single();
-      if (data) setAdminId(data.id);
+      
+      if (!user) {
+        setLoadingData(false);
+        return;
+      }
+
+      // Fetch user profile
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+      if (profileData) setProfile(profileData);
+
+      // Fetch admin id (by role) with fallback
+      try {
+        const { data: adminData, error: adminError } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('role', 'admin')
+          .eq('is_active', true)
+          .limit(1)
+          .maybeSingle();
+        
+        if (adminError) {
+          console.error('Error fetching admin:', adminError);
+          // Fallback: try by email
+          const { data: emailData } = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('email', ADMIN_EMAIL)
+            .limit(1)
+            .maybeSingle();
+          if (emailData?.id) setAdminId(emailData.id);
+        } else if (adminData?.id) {
+          setAdminId(adminData.id);
+        }
+      } catch (err) {
+        console.error('Error in fetchAdmin:', err);
+      }
+
+      // Fetch user's active booking (most recent approved/paid booking)
+      const { data: bookingData, error: bookingError } = await supabase
+        .from('bookings')
+        .select(`
+          id,
+          room_id,
+          price,
+          status,
+          start_date,
+          end_date,
+          created_at,
+          rooms:room_id(type)
+        `)
+        .eq('user_id', user.id)
+        .in('status', ['approved', 'paid', 'pending'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (bookingData && !bookingError) {
+        setCurrentBooking({
+          id: bookingData.id,
+          room_id: bookingData.room_id,
+          room_type: (bookingData.rooms as any)?.type || 'Unknown',
+          price: bookingData.price,
+          status: bookingData.status,
+          start_date: bookingData.start_date,
+          end_date: bookingData.end_date,
+          created_at: bookingData.created_at,
+        });
+
+        // Fetch payments for this booking
+        const { data: paymentsData } = await supabase
+          .from('payments')
+          .select('*')
+          .eq('booking_id', bookingData.id)
+          .order('payment_date', { ascending: false });
+        
+        if (paymentsData) setPayments(paymentsData);
+      }
+
+      setLoadingData(false);
     };
-    getUserAndAdmin();
+    
+    fetchUserData();
   }, []);
 
   // Fetch messages
@@ -35,7 +150,15 @@ const UserDashboard = () => {
       .select()
       .or(`and(sender_id.eq.${uid},receiver_id.eq.${aid}),and(sender_id.eq.${aid},receiver_id.eq.${uid})`)
       .order('created_at');
-    if (!error) setMessages(data || []);
+    if (!error) {
+      setMessages(data || []);
+      // Mark messages as read when user views them
+      const unreadMessages = (data || []).filter((msg: any) => msg.receiver_id === uid && !msg.is_read);
+      if (unreadMessages.length > 0) {
+        const messageIds = unreadMessages.map((msg: any) => msg.id);
+        await supabase.from('messages').update({ is_read: true }).in('id', messageIds);
+      }
+    }
   };
 
   // Real-time subscription
@@ -60,9 +183,45 @@ const UserDashboard = () => {
   const handleSend = async (e: any) => {
     e.preventDefault();
     if (!newMessage.trim() || !user?.id || !adminId) return;
-    const { error } = await supabase.from('messages').insert({ sender_id: user.id, receiver_id: adminId, content: newMessage });
-    if (error) toast({ title: 'Error sending', description: error.message, variant: 'destructive' });
-    setNewMessage("");
+    
+    const messageContent = newMessage.trim();
+    setNewMessage(""); // Clear input immediately
+    
+    // Optimistically add message to UI
+    const tempMessage = {
+      id: `temp-${Date.now()}`,
+      sender_id: user.id,
+      receiver_id: adminId,
+      content: messageContent,
+      created_at: new Date().toISOString(),
+      is_read: false
+    };
+    setMessages(prev => [...prev, tempMessage]);
+    
+    // Send message to database
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({ sender_id: user.id, receiver_id: adminId, content: messageContent })
+      .select()
+      .single();
+    
+    if (error) {
+      toast({ title: 'Error sending', description: error.message, variant: 'destructive' });
+      // Remove temp message on error
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      setNewMessage(messageContent); // Restore message
+      return;
+    }
+    
+    // Replace temp message with real one
+    if (data) {
+      setMessages(prev => {
+        const filtered = prev.filter(m => m.id !== tempMessage.id);
+        return [...filtered, data];
+      });
+      // Refetch to ensure sync
+      setTimeout(() => fetchMessages(user.id, adminId), 500);
+    }
   };
 
   return (
@@ -73,40 +232,72 @@ const UserDashboard = () => {
           <p className="text-muted-foreground">Welcome back, manage your rental information</p>
         </div>
 
-        <div className="grid md:grid-cols-3 gap-6 mb-8">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Current Room</CardTitle>
-              <Home className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">Deluxe Suite</div>
-              <p className="text-xs text-muted-foreground">Room 204</p>
-            </CardContent>
-          </Card>
+        {loadingData ? (
+          <div className="text-center text-lg mb-8">Loading dashboard data...</div>
+        ) : (
+          <div className="grid md:grid-cols-3 gap-6 mb-8">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Current Room</CardTitle>
+                <Home className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">
+                  {currentBooking ? currentBooking.room_type : "No Active Booking"}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {currentBooking 
+                    ? `Booking #${currentBooking.id}${currentBooking.start_date ? ` • ${new Date(currentBooking.start_date).toLocaleDateString()}` : ''}` 
+                    : "Book a room to get started"}
+                </p>
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Monthly Rent</CardTitle>
-              <CreditCard className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">KSh 45,000</div>
-              <p className="text-xs text-muted-foreground">Due on 1st of each month</p>
-            </CardContent>
-          </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Monthly Rent</CardTitle>
+                <CreditCard className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">
+                  {currentBooking 
+                    ? `KSh ${currentBooking.price.toLocaleString()}` 
+                    : "—"}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {currentBooking ? "Due on 1st of each month" : "No active booking"}
+                </p>
+              </CardContent>
+            </Card>
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">Payment Status</CardTitle>
-              <Badge className="bg-green-500">Paid</Badge>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">Current</div>
-              <p className="text-xs text-muted-foreground">Next payment: Feb 1, 2025</p>
-            </CardContent>
-          </Card>
-        </div>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Payment Status</CardTitle>
+                <Badge 
+                  className={
+                    currentBooking?.status === 'paid' 
+                      ? "bg-green-500" 
+                      : currentBooking?.status === 'approved'
+                      ? "bg-yellow-500"
+                      : "bg-gray-500"
+                  }
+                >
+                  {currentBooking?.status || "N/A"}
+                </Badge>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">
+                  {currentBooking?.status === 'paid' ? "Current" : currentBooking?.status || "—"}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {currentBooking 
+                    ? `Status: ${currentBooking.status}` 
+                    : "No active booking"}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         <div className="grid md:grid-cols-2 gap-6">
           <Card>
@@ -115,24 +306,44 @@ const UserDashboard = () => {
               <CardDescription>Your recent rent payments</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {[
-                  { month: "January 2025", amount: 45000, status: "Paid", date: "2025-01-01" },
-                  { month: "December 2024", amount: 45000, status: "Paid", date: "2024-12-01" },
-                  { month: "November 2024", amount: 45000, status: "Paid", date: "2024-11-01" }
-                ].map((payment, i) => (
-                  <div key={i} className="flex items-center justify-between p-4 border rounded-lg">
-                    <div>
-                      <p className="font-medium">{payment.month}</p>
-                      <p className="text-sm text-muted-foreground">{payment.date}</p>
+              {loadingData ? (
+                <div className="text-center text-sm text-muted-foreground">Loading payments...</div>
+              ) : payments.length === 0 ? (
+                <div className="text-center text-sm text-muted-foreground py-4">
+                  No payment history available.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {payments.map((payment) => (
+                    <div key={payment.id} className="flex items-center justify-between p-4 border rounded-lg">
+                      <div>
+                        <p className="font-medium">
+                          {new Date(payment.payment_date).toLocaleDateString('en-US', { 
+                            month: 'long', 
+                            year: 'numeric' 
+                          })}
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {new Date(payment.payment_date).toLocaleDateString()}
+                          {payment.payment_method && ` • ${payment.payment_method}`}
+                        </p>
+                        {payment.transaction_id && (
+                          <p className="text-xs text-muted-foreground">Txn: {payment.transaction_id}</p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <p className="font-medium">KSh {payment.amount.toLocaleString()}</p>
+                        <Badge 
+                          variant={payment.status === 'paid' ? 'secondary' : 'default'} 
+                          className="text-xs"
+                        >
+                          {payment.status}
+                        </Badge>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <p className="font-medium">KSh {payment.amount.toLocaleString()}</p>
-                      <Badge variant="secondary" className="text-xs">{payment.status}</Badge>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 

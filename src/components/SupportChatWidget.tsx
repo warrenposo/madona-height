@@ -25,13 +25,45 @@ const SupportChatWidget = () => {
     return () => listener?.subscription?.unsubscribe?.();
   }, []);
 
-  // Get admin id from profiles
+  // Get admin id from profiles (by role)
   useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.from("profiles").select("id").eq("email", ADMIN_EMAIL).single();
-      if (data && data.id) setAdminId(data.id);
-      else setAdminId(null);
-    })();
+    const fetchAdmin = async () => {
+      try {
+        // Try to find admin by role
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("id")
+          .eq("role", "admin")
+          .eq("is_active", true)
+          .limit(1)
+          .maybeSingle();
+        
+        if (error) {
+          console.error('Error fetching admin:', error);
+          // Fallback: try by email if role query fails
+          const { data: emailData } = await supabase
+            .from("profiles")
+            .select("id")
+            .eq("email", ADMIN_EMAIL)
+            .limit(1)
+            .maybeSingle();
+          if (emailData?.id) {
+            setAdminId(emailData.id);
+          } else {
+            setAdminId(null);
+          }
+        } else if (data?.id) {
+          setAdminId(data.id);
+        } else {
+          setAdminId(null);
+        }
+      } catch (err) {
+        console.error('Error in fetchAdmin:', err);
+        setAdminId(null);
+      }
+    };
+    
+    fetchAdmin();
   }, []);
 
   // Fetch messages between user and admin
@@ -41,7 +73,15 @@ const SupportChatWidget = () => {
       .select()
       .or(`and(sender_id.eq.${uid},receiver_id.eq.${aid}),and(sender_id.eq.${aid},receiver_id.eq.${uid})`)
       .order("created_at");
-    setMessages(data || []);
+    if (!error && data) {
+      setMessages(data || []);
+      // Mark messages as read when user views them
+      const unreadMessages = data.filter((msg: any) => msg.receiver_id === uid && !msg.is_read);
+      if (unreadMessages.length > 0) {
+        const messageIds = unreadMessages.map((msg: any) => msg.id);
+        await supabase.from('messages').update({ is_read: true }).in('id', messageIds);
+      }
+    }
   };
 
   // Real-time subscribe and fallback polling
@@ -78,12 +118,45 @@ const SupportChatWidget = () => {
       setError("Support unavailable or message empty.");
       return;
     }
-    const { error } = await supabase.from("messages").insert({ sender_id: user.id, receiver_id: adminId, content: newMessage });
+    
+    const messageContent = newMessage.trim();
+    setNewMessage(""); // Clear input immediately for better UX
+    
+    // Optimistically add message to UI
+    const tempMessage = {
+      id: `temp-${Date.now()}`,
+      sender_id: user.id,
+      receiver_id: adminId,
+      content: messageContent,
+      created_at: new Date().toISOString(),
+      is_read: false
+    };
+    setMessages(prev => [...prev, tempMessage]);
+    
+    // Send message to database
+    const { data, error } = await supabase
+      .from("messages")
+      .insert({ sender_id: user.id, receiver_id: adminId, content: messageContent })
+      .select()
+      .single();
+    
     if (error) {
       setError(error.message);
+      // Remove temp message on error
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      setNewMessage(messageContent); // Restore message
       return;
     }
-    setNewMessage("");
+    
+    // Replace temp message with real one and refetch to ensure sync
+    if (data) {
+      setMessages(prev => {
+        const filtered = prev.filter(m => m.id !== tempMessage.id);
+        return [...filtered, data];
+      });
+      // Refetch to ensure we have the latest
+      setTimeout(() => fetchMessages(user.id, adminId), 500);
+    }
   };
 
   // Guest or not ready
